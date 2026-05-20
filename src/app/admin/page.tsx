@@ -12419,7 +12419,7 @@ const OPDSConfigComponent = ({
         <div className='mb-3 flex items-center justify-between gap-3'>
           <div>
             <h4 className='text-sm font-medium text-amber-900 dark:text-amber-100'>Legado 订阅</h4>
-            <p className='mt-1 text-xs text-amber-800 dark:text-amber-200'>输入订阅 URL 导入，支持大型书源订阅。</p>
+            <p className='mt-1 text-xs text-amber-800 dark:text-amber-200'>目前处于实验性阶段，仅支持部分简单订阅。</p>
           </div>
           <button type='button' onClick={importLegadoSubscription} disabled={!legadoSubscriptionUrl.trim() || isLoading('importLegadoSubscription')} className={buttonStyles.primarySmall}>{isLoading('importLegadoSubscription') ? '导入中...' : '导入订阅'}</button>
         </div>

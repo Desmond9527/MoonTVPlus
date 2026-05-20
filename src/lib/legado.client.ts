@@ -224,6 +224,18 @@ function runJsSnippetRaw(code: string, context: Record<string, any>, timeout = 1
     hexDecodeToString: (value: unknown) => Buffer.from(String(value ?? ''), 'hex').toString('utf8'),
     ajax: () => '',
     getWebViewUA: () => 'Mozilla/5.0 (Linux; Android 10) Mobile Safari/537.36',
+    getElements: (selectorRule: string) => {
+      const raw = jsonPrimitiveToString(context.result ?? context.src ?? '');
+      if (!raw) return [];
+      const $ = cheerio.load(raw);
+      let nodes = selectElements($, $.root(), selectorRule);
+      if (nodes.length === 0 && /#chapter-items@a/.test(selectorRule)) nodes = $('#chapter-items').find('a');
+      return nodes.toArray().map((element) => {
+        const node = $(element);
+        const attrs = (element as any).attribs || {};
+        return { ...attrs, text: node.text().trim(), href: attrs.href, src: attrs.src, html: node.html() || '' };
+      });
+    },
     deviceID: () => '',
     androidId: () => '',
     longToast: () => undefined,
@@ -449,6 +461,21 @@ function selectJsonItems(json: any, rule?: string): any[] {
 function evaluateJsListRule(rule: string | undefined, context: Record<string, any>): any[] {
   const trimmed = (rule || '').trim();
   if (!/^(?:@js:|<js>)/i.test(trimmed)) return [];
+  const elementRules = Array.from(trimmed.matchAll(/java\.getElements\(\s*(['"`])([\s\S]*?)\1\s*\)/g)).map((match) => match[2]).filter(Boolean);
+  if (elementRules.length > 0) {
+    const raw = jsonPrimitiveToString(context.result ?? context.src ?? '');
+    const $ = cheerio.load(raw);
+    for (const selectorRule of elementRules) {
+      let nodes = selectElements($, $.root(), selectorRule);
+      if (nodes.length === 0 && /#chapter-items@a/.test(selectorRule)) nodes = $('#chapter-items').find('a');
+      const items = nodes.toArray().map((element) => {
+        const node = $(element);
+        const attrs = (element as any).attribs || {};
+        return { ...attrs, text: node.text().trim(), href: attrs.href, src: attrs.src, html: node.html() || '' };
+      });
+      if (items.length > 0) return items;
+    }
+  }
   const value = runJsSnippetRaw(trimmed, context);
   if (Array.isArray(value)) return value;
   if (value && typeof value === 'object') return [value];
@@ -740,6 +767,12 @@ function selectXPath($: cheerio.CheerioAPI, root: cheerio.Cheerio<any>, rule: st
 
 function readValue($: cheerio.CheerioAPI, root: cheerio.Cheerio<any>, rule?: string, baseUrl?: string, jsContext?: Record<string, any>): string {
   for (const alternative of splitAlternatives(rule)) {
+    const templateKind = alternative.match(/\{\{\s*@@([\s\S]*?)\}\}/);
+    if (templateKind) {
+      const value = alternative.replace(/\{\{\s*@@([\s\S]*?)\}\}/g, (_, innerRule) => readValue($, root, String(innerRule).trim(), baseUrl, jsContext));
+      if (value) return value;
+      continue;
+    }
     if (alternative.includes('{{baseUrl}}')) {
       const { base, filters } = splitRuleFilters(alternative);
       const value = applyRuleFilters(base.replace(/\{\{baseUrl\}\}/g, baseUrl || ''), filters);
@@ -747,12 +780,12 @@ function readValue($: cheerio.CheerioAPI, root: cheerio.Cheerio<any>, rule?: str
       continue;
     }
     if (/^<js>/i.test(alternative.trim())) {
-      const transformed = runJsSnippet(alternative, { ...(jsContext || {}), result: root.text(), src: root.text(), baseUrl });
+      const transformed = runJsSnippet(alternative, { ...(jsContext || {}), result: $.html(root), src: $.html(root), baseUrl });
       if (transformed) return /^(?:https?:)?\/\//i.test(transformed) || transformed.startsWith('/') ? normalizeUrl(baseUrl || '', transformed) : transformed;
       continue;
     }
     if (/^@js:/i.test(alternative.trim())) {
-      const transformed = runJsSnippet(alternative, { ...(jsContext || {}), result: root.text(), src: root.text(), baseUrl });
+      const transformed = runJsSnippet(alternative, { ...(jsContext || {}), result: $.html(root), src: $.html(root), baseUrl });
       if (transformed) return /^(?:https?:)?\/\//i.test(transformed) || transformed.startsWith('/') ? normalizeUrl(baseUrl || '', transformed) : transformed;
       continue;
     }
@@ -871,6 +904,26 @@ function applyBookInfoInit($: cheerio.CheerioAPI, root: cheerio.Cheerio<any>, in
 }
 
 function applyContentJsRule(value: string, jsRule: string): string {
+  const encryptedParams = value.match(/params\s*=\s*'([^']+)'/)?.[1];
+  if (encryptedParams) {
+    try {
+      const encrypted = Buffer.from(encryptedParams, 'base64');
+      const decipher = crypto.createDecipheriv('aes-128-cbc', Buffer.from('5V&RoR%Jf@pJPydF'), encrypted.subarray(0, 16));
+      const decoded = Buffer.concat([decipher.update(encrypted.subarray(16)), decipher.final()]).toString('utf8');
+      const data = JSON.parse(decoded);
+      const images = Array.isArray(data?.chapter_images) ? data.chapter_images : [];
+      const imageBase = data?.chapter_domain || data?.images_domain || data?.cdnurl || 'https://six.mhpic.net';
+      if (images.length > 0) {
+        return images
+          .map((src: string) => normalizeUrl(imageBase, String(src || '')))
+          .filter(Boolean)
+          .map((src: string) => `<img src="${src}" style="max-width:100%; display:block;" referrerpolicy="no-referrer">`)
+          .join('\n');
+      }
+    } catch {
+      // fallback to generic JS execution below
+    }
+  }
   if (/window\.comicInfo/.test(value)) {
     try {
       const match = value.match(/window\.comicInfo\s*=\s*(.*?)(?:,window\.hideguide|;|<\/script>)/);
@@ -906,9 +959,10 @@ function contentFromRule(raw: string, rule?: string, baseUrl?: string): string {
     return readJsonRule(json, rule, undefined, baseUrl);
   }
   const rawRule = rule || '';
+  const blockJs = rawRule.trim().match(/^<js>([\s\S]*?)<\/js>$/i);
   const jsIndex = rawRule.indexOf('@js:');
-  const selectorRule = jsIndex >= 0 ? rawRule.slice(0, jsIndex).trim() : rawRule;
-  const jsRule = jsIndex >= 0 ? rawRule.slice(jsIndex + 4).trim() : '';
+  const selectorRule = blockJs ? '' : jsIndex >= 0 ? rawRule.slice(0, jsIndex).trim() : rawRule;
+  const jsRule = blockJs ? blockJs[1].trim() : jsIndex >= 0 ? rawRule.slice(jsIndex + 4).trim() : '';
   const $ = cheerio.load(raw);
   if (jsRule) {
     const values = selectorRule ? readValues($, $.root(), selectorRule, baseUrl) : [];

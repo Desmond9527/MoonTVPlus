@@ -46,7 +46,6 @@ export default function BooksHomePage() {
     <div className='space-y-6'>
       <section className='rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950'>
         <h1 className='text-lg font-semibold'>电子书源</h1>
-        <p className='mt-1 text-sm text-gray-500 dark:text-gray-400'>支持 OPDS 与 Legado 书源，提供搜索、书架与在线阅读。</p>
       </section>
 
       {loading ? <BooksHomeSkeleton /> : null}
